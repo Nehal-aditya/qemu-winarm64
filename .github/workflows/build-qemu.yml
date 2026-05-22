@@ -93,7 +93,7 @@ jobs:
                 --enable-gnutls \
                 --enable-gcrypt \
                 --prefix="$INSTALL_PREFIX"
-                
+
       - name: Compile Source Code Engine
         run: |
             cd $GITHUB_WORKSPACE/qemu-source
@@ -102,7 +102,7 @@ jobs:
 
       - name: Flatten App Structure and Bundle Required DLLs
         run: |
-          OUTDIR="$GITHUB_WORKSPACE/qemu-windows-arm64"
+          OUTDIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-windows-arm64
 
           # Move EXEs up to the root of the output dir
           mv "$OUTDIR/bin/"*.exe "$OUTDIR/"
