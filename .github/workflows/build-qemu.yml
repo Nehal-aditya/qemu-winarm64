@@ -71,6 +71,10 @@ jobs:
           mkdir -p "$NSIS_PLUGINS/amd64-unicode"
           mkdir -p "$NSIS_PLUGINS/x86-unicode"
 
+          NSIS_HOME=$(dirname "$(which makensis)")/../share/nsis
+          echo "NSIS_HOME resolved to: $NSIS_HOME"
+
+
           unzip -j envar_plugin.zip "Plugins/amd64-unicode/EnVar.dll" \
               -d "$NSIS_PLUGINS/amd64-unicode/"
           unzip -j envar_plugin.zip "Plugins/x86-unicode/EnVar.dll" \
