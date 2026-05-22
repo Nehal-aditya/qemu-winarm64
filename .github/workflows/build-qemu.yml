@@ -96,7 +96,10 @@ jobs:
 
       - name: Compile Source Code Engine
         run: |
-            cd $GITHUB_WORKSPACE/qemu-source
+            # Always use cygpath to convert to POSIX — raw $GITHUB_WORKSPACE is a
+            # Windows path and will silently misdirect cd inside the MSYS2 shell.
+            SOURCE_DIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-source
+            cd "$SOURCE_DIR"
             make -j$(nproc)
             make install
 
@@ -104,19 +107,28 @@ jobs:
         run: |
           OUTDIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-windows-arm64
 
+          # Sanity-check: fail loudly if make install produced nothing
+          if [ ! -d "$OUTDIR/bin" ]; then
+            echo "ERROR: $OUTDIR/bin does not exist — make install likely failed or used the wrong prefix."
+            exit 1
+          fi
+
           # Move EXEs up to the root of the output dir
           mv "$OUTDIR/bin/"*.exe "$OUTDIR/"
 
-          # Copy firmware/keymaps/etc from share
-          cp -r "$OUTDIR/share/qemu/"* "$OUTDIR/"
+          # Copy firmware/keymaps/etc from share (guard against missing dir)
+          if [ -d "$OUTDIR/share/qemu" ]; then
+            cp -r "$OUTDIR/share/qemu/"* "$OUTDIR/"
+          fi
 
           # Use ntldd to collect only the DLLs each EXE actually needs,
           # filtering to only those that live inside the CLANGARM64 prefix.
+          # Column 3 holds the resolved path; skip lines where it's "not" (not found).
           for exe in "$OUTDIR/"*.exe; do
             ntldd -R "$exe" \
               | grep -i '/clangarm64/' \
-              | awk '{print $3}' \
-              | xargs -I{} cp --no-clobber "{}" "$OUTDIR/" || true
+              | awk '$3 != "not" {print $3}' \
+              | xargs -r -I{} cp --no-clobber "{}" "$OUTDIR/" || true
           done
 
           # Clean up install-tree directories that are no longer needed
