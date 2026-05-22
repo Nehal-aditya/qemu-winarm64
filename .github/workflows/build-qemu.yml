@@ -93,11 +93,12 @@ jobs:
                 --enable-gnutls \
                 --enable-gcrypt \
                 --prefix="$INSTALL_PREFIX"
-                - name: Compile Source Code Engine
-                run: |
-                    cd $GITHUB_WORKSPACE/qemu-source
-                    make -j$(nproc)
-                    make install
+                
+      - name: Compile Source Code Engine
+        run: |
+            cd $GITHUB_WORKSPACE/qemu-source
+            make -j$(nproc)
+            make install
 
       - name: Flatten App Structure and Bundle Required DLLs
         run: |
