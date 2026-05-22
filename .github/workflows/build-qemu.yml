@@ -82,8 +82,12 @@ jobs:
 
       - name: Configure QEMU Execution Layers (WHPX Enabled)
         run: |
-            # Convert Windows path to POSIX so backslashes don't end up in C string literals
-            INSTALL_PREFIX=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-windows-arm64
+            # meson (which QEMU's configure delegates to) requires a native Windows
+            # path for --prefix on Windows hosts. A POSIX /c/... path is accepted by
+            # the shell but meson passes it straight to Windows APIs, which don't
+            # understand it — causing `ninja install` to write to the wrong location
+            # (or nowhere). Use `cygpath -w` to get the canonical Windows path.
+            INSTALL_PREFIX=$(cygpath -w "$GITHUB_WORKSPACE")/qemu-windows-arm64
             SOURCE_DIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-source
 
             cd "$SOURCE_DIR"
@@ -136,11 +140,13 @@ jobs:
 
       - name: Test Compiled Binaries (Health Check)
         run: |
+          OUTDIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-windows-arm64
+
           echo "Testing ARM64 emulator..."
-          $GITHUB_WORKSPACE/qemu-windows-arm64/qemu-system-aarch64.exe --version
+          "$OUTDIR/qemu-system-aarch64.exe" --version
 
           echo "Testing x86_64 emulator..."
-          $GITHUB_WORKSPACE/qemu-windows-arm64/qemu-system-x86_64.exe --version
+          "$OUTDIR/qemu-system-x86_64.exe" --version
 
           echo "Health check passed — all required DLLs are present and binaries execute."
 
@@ -155,8 +161,10 @@ jobs:
 
       - name: Generate User-Scoped Installer
         run: |
-          cp $GITHUB_WORKSPACE/config-repo/installer.nsi $GITHUB_WORKSPACE/
-          makensis $GITHUB_WORKSPACE/installer.nsi
+          WORKSPACE=$(cygpath -u "$GITHUB_WORKSPACE")
+          cp "$WORKSPACE/config-repo/installer.nsi" "$WORKSPACE/"
+          # makensis is the native Windows x64 binary — give it a Windows path
+          makensis "$(cygpath -w "$WORKSPACE")/installer.nsi"
 
       - name: Sign Installer (Self-Signed Placeholder)
         # NOTE: This produces a self-signed cert for build traceability only.
