@@ -1,0 +1,151 @@
+name: Build, Test, and Deploy QEMU (Windows ARM64)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-pack:
+    runs-on: windows-11-arm
+    
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout Pipeline Configuration
+        uses: actions/checkout@v4
+        with:
+          path: config-repo
+
+      - name: Checkout QEMU Source Code
+        uses: actions/checkout@v4
+        with:
+          repository: 'qemu/qemu'
+          ref: ${{ github.ref_name }}
+          path: qemu-source
+
+      - name: Setup MSYS2 Environment with NSIS
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64 
+          update: true
+          install: >-
+            git
+            make
+            python3
+            mingw-w64-clang-aarch64-clang
+            mingw-w64-clang-aarch64-toolchain
+            mingw-w64-clang-aarch64-ninja
+            mingw-w64-clang-aarch64-pkg-config
+            mingw-w64-clang-aarch64-glib2
+            mingw-w64-clang-aarch64-pixman
+            mingw-w64-clang-aarch64-libgcrypt
+            mingw-w64-clang-aarch64-gnutls
+            mingw-w64-clang-aarch64-capstone
+            mingw-w64-clang-aarch64-nsis
+
+      - name: Download and Install NSIS EnVar Plugin
+        run: |
+          curl -sSL -o envar_plugin.zip https://github.com/gutzmo/NSIS-EnVar/releases/download/v0.3.1/EnVar-v0.3.1.zip
+          unzip -j envar_plugin.zip "Plugins/amd64-unicode/EnVar.dll" -d /clangarm64/share/nsis/Plugins/amd64-unicode/
+          unzip -j envar_plugin.zip "Plugins/x86-unicode/EnVar.dll" -d /clangarm64/share/nsis/Plugins/x86-unicode/
+
+      - name: Configure QEMU Execution Layers (WHPX Enabled)
+        run: |
+          cd $GITHUB_WORKSPACE/qemu-source
+          ./configure \
+            --target-list=aarch64-softmmu,x86_64-softmmu \
+            --enable-whpx \
+            --enable-gnutls \
+            --enable-gcrypt \
+            --prefix=$GITHUB_WORKSPACE/qemu-windows-arm64
+
+      - name: Compile Source Code Engine
+        run: |
+          cd $GITHUB_WORKSPACE/qemu-source
+          make -j$(nproc)
+          make install
+
+      - name: Flatten App Structure and Pull Dependencies
+        run: |
+          mv $GITHUB_WORKSPACE/qemu-windows-arm64/bin/*.exe $GITHUB_WORKSPACE/qemu-windows-arm64/
+          cp /clangarm64/bin/*.dll $GITHUB_WORKSPACE/qemu-windows-arm64/
+          cp -r $GITHUB_WORKSPACE/qemu-windows-arm64/share/qemu/* $GITHUB_WORKSPACE/qemu-windows-arm64/
+          
+          rm -rf $GITHUB_WORKSPACE/qemu-windows-arm64/bin
+          rm -rf $GITHUB_WORKSPACE/qemu-windows-arm64/share
+          rm -rf $GITHUB_WORKSPACE/qemu-windows-arm64/include
+
+      # === NEW: AUTOMATED HEALTH CHECK TEST ===
+      - name: Test Compiled Binaries (Health Check)
+        run: |
+          echo "Testing ARM64 Emulator Execution..."
+          $GITHUB_WORKSPACE/qemu-windows-arm64/qemu-system-aarch64.exe --version
+          
+          echo "Testing x86_64 Emulator Execution..."
+          $GITHUB_WORKSPACE/qemu-windows-arm64/qemu-system-x86_64.exe --version
+          
+          echo "Health check passed. All DLL dependencies are present and binaries execute."
+
+      # === NEW: UPLOAD DEBUG LOGS ON FAILURE ===
+      - name: Upload Debug Logs (If Compilation or Test Fails)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-build-debug-logs
+          path: |
+            ${{ github.workspace }}/qemu-source/config.log
+            ${{ github.workspace }}/qemu-source/build/meson-logs/meson-log.txt
+
+      - name: Generate the User-Scoped Executable Installer
+        run: |
+          cp $GITHUB_WORKSPACE/config-repo/installer.nsi $GITHUB_WORKSPACE/
+          makensis $GITHUB_WORKSPACE/installer.nsi
+
+      - name: Sign the User-Only Setup Installer
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert `
+            -Subject "CN=MyCustomQEMUBuild" `
+            -CertStoreLocation "Cert:\CurrentUser\My"
+
+          $password = ConvertTo-SecureString "Password123" -AsPlainText -Force
+          Export-PfxCertificate -Cert $cert `
+            -FilePath "$env:GITHUB_WORKSPACE\certificate.pfx" `
+            -Password $password
+
+          $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Filter signtool.exe -Recurse | 
+                      Select-Object -First 1 -ExpandProperty FullName
+
+          & $signtool sign /f "$env:GITHUB_WORKSPACE\certificate.pfx" `
+            /p "Password123" `
+            /fd SHA256 `
+            "$env:GITHUB_WORKSPACE\qemu-user-setup.exe"
+
+      # === NEW: UPLOAD RAW BINARIES FOR DEBUGGING ===
+      - name: Upload Raw Unpackaged Binaries (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-raw-binaries-arm64
+          path: ${{ github.workspace }}/qemu-windows-arm64/
+          retention-days: 7
+
+      - name: Push Installer to GitHub Releases
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $TagName = "${{ github.ref_name }}"
+          if ($TagName -match "refs/heads") { $TagName = "manual-snapshot" }
+          
+          gh release create $TagName `
+            "$env:GITHUB_WORKSPACE\qemu-user-setup.exe" `
+            --title "QEMU User Setup Installer ($TagName)" `
+            --notes "Native user-only installation executable for Snapdragon Windows ARM64. Supports installation to secondary drives without admin credentials." `
+            --clobber
