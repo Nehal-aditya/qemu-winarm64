@@ -82,19 +82,22 @@ jobs:
 
       - name: Configure QEMU Execution Layers (WHPX Enabled)
         run: |
-          cd $GITHUB_WORKSPACE/qemu-source
-          ./configure \
-            --target-list=aarch64-softmmu,x86_64-softmmu \
-            --enable-whpx \
-            --enable-gnutls \
-            --enable-gcrypt \
-            --prefix=$GITHUB_WORKSPACE/qemu-windows-arm64
+            # Convert Windows path to POSIX so backslashes don't end up in C string literals
+            INSTALL_PREFIX=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-windows-arm64
+            SOURCE_DIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-source
 
-      - name: Compile Source Code Engine
-        run: |
-          cd $GITHUB_WORKSPACE/qemu-source
-          make -j$(nproc)
-          make install
+            cd "$SOURCE_DIR"
+            ./configure \
+                --target-list=aarch64-softmmu,x86_64-softmmu \
+                --enable-whpx \
+                --enable-gnutls \
+                --enable-gcrypt \
+                --prefix="$INSTALL_PREFIX"
+                - name: Compile Source Code Engine
+                run: |
+                    cd $GITHUB_WORKSPACE/qemu-source
+                    make -j$(nproc)
+                    make install
 
       - name: Flatten App Structure and Bundle Required DLLs
         run: |
