@@ -82,12 +82,15 @@ jobs:
 
       - name: Configure QEMU Execution Layers (WHPX Enabled)
         run: |
-            # meson (which QEMU's configure delegates to) requires a native Windows
-            # path for --prefix on Windows hosts. A POSIX /c/... path is accepted by
-            # the shell but meson passes it straight to Windows APIs, which don't
-            # understand it — causing `ninja install` to write to the wrong location
-            # (or nowhere). Use `cygpath -w` to get the canonical Windows path.
-            INSTALL_PREFIX=$(cygpath -w "$GITHUB_WORKSPACE")/qemu-windows-arm64
+            # --prefix must satisfy two constraints simultaneously:
+            #   1. meson/Windows APIs need a real drive-letter path (C:/...)
+            #      not a POSIX /c/... path, otherwise ninja install goes nowhere
+            #   2. meson bakes the value into a C string literal in config-host.h:
+            #        #define CONFIG_PREFIX "..."
+            #      backslashes become invalid escape sequences (\a, \q, etc.)
+            #      and the build fails to compile — so NO backslashes allowed.
+            # `cygpath -m` produces exactly the right format: C:/a/.../dir
+            INSTALL_PREFIX=$(cygpath -m "$GITHUB_WORKSPACE")/qemu-windows-arm64
             SOURCE_DIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-source
 
             cd "$SOURCE_DIR"
