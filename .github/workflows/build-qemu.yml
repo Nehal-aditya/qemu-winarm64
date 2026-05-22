@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      qemu_version:
+        description: 'QEMU tag to build (e.g. v9.2.0)'
+        required: true
+        default: 'v9.2.0'
 
 permissions:
   contents: write
@@ -12,10 +17,15 @@ permissions:
 jobs:
   build-test-pack:
     runs-on: windows-11-arm
-    
+
     defaults:
       run:
         shell: msys2 {0}
+
+    # Resolve the QEMU ref: use the tag on push/tag triggers,
+    # or the manually supplied version on workflow_dispatch.
+    env:
+      QEMU_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.qemu_version || github.ref_name }}
 
     steps:
       - name: Checkout Pipeline Configuration
@@ -27,15 +37,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: 'qemu/qemu'
-          ref: ${{ github.ref_name }}
+          ref: ${{ env.QEMU_REF }}
           path: qemu-source
 
       - name: Setup MSYS2 Environment with NSIS
         uses: msys2/setup-msys2@v2
         with:
-          msystem: CLANGARM64 
+          msystem: CLANGARM64
           update: true
-          # We add mingw64 to the path to allow the runner to find the x64 nsis build
+          # Inherit PATH so the runner can find the x64 NSIS build
           path-type: inherit
           install: >-
             git
@@ -50,13 +60,17 @@ jobs:
             mingw-w64-clang-aarch64-libgcrypt
             mingw-w64-clang-aarch64-gnutls
             mingw-w64-clang-aarch64-capstone
+            mingw-w64-clang-aarch64-ntldd
             mingw-w64-x86_64-nsis
 
       - name: Download and Install NSIS EnVar Plugin
         run: |
-          curl -sSL -o envar_plugin.zip https://github.com/gutzmo/NSIS-EnVar/releases/download/v0.3.1/EnVar-v0.3.1.zip
-          unzip -j envar_plugin.zip "Plugins/amd64-unicode/EnVar.dll" -d /clangarm64/share/nsis/Plugins/amd64-unicode/
-          unzip -j envar_plugin.zip "Plugins/x86-unicode/EnVar.dll" -d /clangarm64/share/nsis/Plugins/x86-unicode/
+          curl -sSfL -o envar_plugin.zip \
+            https://github.com/GsNSIS/EnVar/releases/latest/download/EnVar-Plugin.zip
+          unzip -j envar_plugin.zip "Plugins/amd64-unicode/EnVar.dll" \
+            -d /clangarm64/share/nsis/Plugins/amd64-unicode/
+          unzip -j envar_plugin.zip "Plugins/x86-unicode/EnVar.dll" \
+            -d /clangarm64/share/nsis/Plugins/x86-unicode/
 
       - name: Configure QEMU Execution Layers (WHPX Enabled)
         run: |
@@ -74,47 +88,59 @@ jobs:
           make -j$(nproc)
           make install
 
-      - name: Flatten App Structure and Pull Dependencies
+      - name: Flatten App Structure and Bundle Required DLLs
         run: |
-          mv $GITHUB_WORKSPACE/qemu-windows-arm64/bin/*.exe $GITHUB_WORKSPACE/qemu-windows-arm64/
-          cp /clangarm64/bin/*.dll $GITHUB_WORKSPACE/qemu-windows-arm64/
-          cp -r $GITHUB_WORKSPACE/qemu-windows-arm64/share/qemu/* $GITHUB_WORKSPACE/qemu-windows-arm64/
-          
-          rm -rf $GITHUB_WORKSPACE/qemu-windows-arm64/bin
-          rm -rf $GITHUB_WORKSPACE/qemu-windows-arm64/share
-          rm -rf $GITHUB_WORKSPACE/qemu-windows-arm64/include
+          OUTDIR="$GITHUB_WORKSPACE/qemu-windows-arm64"
 
-      # === NEW: AUTOMATED HEALTH CHECK TEST ===
+          # Move EXEs up to the root of the output dir
+          mv "$OUTDIR/bin/"*.exe "$OUTDIR/"
+
+          # Copy firmware/keymaps/etc from share
+          cp -r "$OUTDIR/share/qemu/"* "$OUTDIR/"
+
+          # Use ntldd to collect only the DLLs each EXE actually needs,
+          # filtering to only those that live inside the CLANGARM64 prefix.
+          for exe in "$OUTDIR/"*.exe; do
+            ntldd -R "$exe" \
+              | grep -i '/clangarm64/' \
+              | awk '{print $3}' \
+              | xargs -I{} cp --no-clobber "{}" "$OUTDIR/" || true
+          done
+
+          # Clean up install-tree directories that are no longer needed
+          rm -rf "$OUTDIR/bin" "$OUTDIR/share" "$OUTDIR/include"
+
       - name: Test Compiled Binaries (Health Check)
         run: |
-          echo "Testing ARM64 Emulator Execution..."
+          echo "Testing ARM64 emulator..."
           $GITHUB_WORKSPACE/qemu-windows-arm64/qemu-system-aarch64.exe --version
-          
-          echo "Testing x86_64 Emulator Execution..."
-          $GITHUB_WORKSPACE/qemu-windows-arm64/qemu-system-x86_64.exe --version
-          
-          echo "Health check passed. All DLL dependencies are present and binaries execute."
 
-      # === NEW: UPLOAD DEBUG LOGS ON FAILURE ===
-      - name: Upload Debug Logs (If Compilation or Test Fails)
+          echo "Testing x86_64 emulator..."
+          $GITHUB_WORKSPACE/qemu-windows-arm64/qemu-system-x86_64.exe --version
+
+          echo "Health check passed — all required DLLs are present and binaries execute."
+
+      - name: Upload Debug Logs (On Failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: qemu-build-debug-logs
           path: |
-            ${{ github.workspace }}/qemu-source/config.log
             ${{ github.workspace }}/qemu-source/build/meson-logs/meson-log.txt
+            ${{ github.workspace }}/qemu-source/build/meson-logs/testlog.txt
 
-      - name: Generate the User-Scoped Executable Installer
+      - name: Generate User-Scoped Installer
         run: |
           cp $GITHUB_WORKSPACE/config-repo/installer.nsi $GITHUB_WORKSPACE/
           makensis $GITHUB_WORKSPACE/installer.nsi
 
-      - name: Sign the User-Only Setup Installer
+      - name: Sign Installer (Self-Signed Placeholder)
+        # NOTE: This produces a self-signed cert for build traceability only.
+        # SmartScreen reputation requires an EV code-signing cert from a trusted CA.
         shell: pwsh
         run: |
           $cert = New-SelfSignedCertificate -Type CodeSigningCert `
-            -Subject "CN=MyCustomQEMUBuild" `
+            -Subject "CN=QEMUWinARM64-Build" `
             -CertStoreLocation "Cert:\CurrentUser\My"
 
           $password = ConvertTo-SecureString "Password123" -AsPlainText -Force
@@ -122,16 +148,19 @@ jobs:
             -FilePath "$env:GITHUB_WORKSPACE\certificate.pfx" `
             -Password $password
 
-          $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Filter signtool.exe -Recurse | 
-                      Select-Object -First 1 -ExpandProperty FullName
+          $signtool = Get-ChildItem `
+            -Path "C:\Program Files (x86)\Windows Kits\10\bin" `
+            -Filter signtool.exe -Recurse |
+            Select-Object -First 1 -ExpandProperty FullName
 
-          & $signtool sign /f "$env:GITHUB_WORKSPACE\certificate.pfx" `
+          & $signtool sign `
+            /f "$env:GITHUB_WORKSPACE\certificate.pfx" `
             /p "Password123" `
             /fd SHA256 `
+            /d "QEMU for Windows ARM64" `
             "$env:GITHUB_WORKSPACE\qemu-user-setup.exe"
 
-      # === NEW: UPLOAD RAW BINARIES FOR DEBUGGING ===
-      - name: Upload Raw Unpackaged Binaries (Artifact)
+      - name: Upload Raw Binaries Artifact
         uses: actions/upload-artifact@v4
         with:
           name: qemu-raw-binaries-arm64
@@ -143,11 +172,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $TagName = "${{ github.ref_name }}"
-          if ($TagName -match "refs/heads") { $TagName = "manual-snapshot" }
-          
+          $TagName = "${{ env.QEMU_REF }}"
+          # Sanitise: if somehow a branch ref slips through, use a snapshot label
+          if ($TagName -notmatch '^v') { $TagName = "manual-snapshot-$TagName" }
+
           gh release create $TagName `
             "$env:GITHUB_WORKSPACE\qemu-user-setup.exe" `
-            --title "QEMU User Setup Installer ($TagName)" `
-            --notes "Native user-only installation executable for Snapdragon Windows ARM64. Supports installation to secondary drives without admin credentials." `
+            --title "QEMU Windows ARM64 — $TagName" `
+            --notes "Native QEMU build for Snapdragon / Windows 11 ARM64.
+          Targets: aarch64-softmmu, x86_64-softmmu. WHPX acceleration enabled. User-scoped installer — no admin credentials required. Supports custom install paths and secondary drives." `
             --clobber
