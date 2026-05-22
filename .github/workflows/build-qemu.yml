@@ -35,6 +35,8 @@ jobs:
         with:
           msystem: CLANGARM64 
           update: true
+          # We add mingw64 to the path to allow the runner to find the x64 nsis build
+          path-type: inherit
           install: >-
             git
             make
@@ -48,7 +50,7 @@ jobs:
             mingw-w64-clang-aarch64-libgcrypt
             mingw-w64-clang-aarch64-gnutls
             mingw-w64-clang-aarch64-capstone
-            mingw-w64-clang-aarch64-nsis
+            mingw-w64-x86_64-nsis
 
       - name: Download and Install NSIS EnVar Plugin
         run: |
