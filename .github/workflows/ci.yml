@@ -1,0 +1,271 @@
+name: CI — Validate Release Installer
+
+# Runs automatically when a new release is published by the build workflow,
+# and can also be triggered manually to re-check any existing release tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to validate (e.g. v11.0.0). Leave blank to use the latest release."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Installer from Release
+    runs-on: windows-11-arm
+
+    steps:
+      # ---------------------------------------------------------------
+      # 1. Resolve which release tag to test
+      # ---------------------------------------------------------------
+      - name: Resolve Release Tag
+        id: tag
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $input = "${{ github.event.inputs.tag }}"
+
+          if ($input -ne "") {
+            $tag = $input
+            Write-Host "Using manually specified tag: $tag"
+          } elseif ("${{ github.event_name }}" -eq "release") {
+            $tag = "${{ github.event.release.tag_name }}"
+            Write-Host "Using release event tag: $tag"
+          } else {
+            # Fall back to latest release via GitHub API
+            $resp = gh release list --limit 1 --json tagName | ConvertFrom-Json
+            $tag  = $resp[0].tagName
+            Write-Host "Using latest release tag: $tag"
+          }
+
+          if ($tag -eq "") {
+            Write-Error "Could not resolve a release tag."
+            exit 1
+          }
+
+          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
+
+      # ---------------------------------------------------------------
+      # 2. Download the installer from the resolved release
+      # ---------------------------------------------------------------
+      - name: Download Installer from Release
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.tag.outputs.TAG }}"
+          Write-Host "Downloading qemu-user-setup.exe from release $tag ..."
+          gh release download $tag --pattern "qemu-user-setup.exe" --dir "$env:TEMP\qemu-ci" --repo $env:GITHUB_REPOSITORY
+          if (-not (Test-Path "$env:TEMP\qemu-ci\qemu-user-setup.exe")) {
+            Write-Error "Installer not found in release $tag."
+            exit 1
+          }
+          $size = (Get-Item "$env:TEMP\qemu-ci\qemu-user-setup.exe").Length
+          Write-Host "Downloaded installer: $size bytes"
+          if ($size -lt 10MB) {
+            Write-Error "Installer is suspiciously small ($size bytes). Build may have been incomplete."
+            exit 1
+          }
+
+      # ---------------------------------------------------------------
+      # 3. Verify installer is a valid PE executable (not corrupted)
+      # ---------------------------------------------------------------
+      - name: Verify Installer Is a Valid PE Binary
+        shell: pwsh
+        run: |
+          $path = "$env:TEMP\qemu-ci\qemu-user-setup.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          # PE files start with MZ (0x4D 0x5A)
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            Write-Error "Installer does not have a valid MZ/PE header. File may be corrupted."
+            exit 1
+          }
+          Write-Host "PE header check passed (MZ signature present)."
+
+      # ---------------------------------------------------------------
+      # 4. Run silent install to a temp directory
+      # ---------------------------------------------------------------
+      - name: Run Silent Install
+        shell: pwsh
+        run: |
+          $installer = "$env:TEMP\qemu-ci\qemu-user-setup.exe"
+          $installDir = "$env:TEMP\qemu-ci\install"
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+          Write-Host "Running silent install to: $installDir"
+          # /S = NSIS silent mode, /D= sets install directory (must be last, no quotes)
+          $proc = Start-Process -FilePath $installer `
+            -ArgumentList "/S /D=$installDir" `
+            -Wait -PassThru
+          Write-Host "Installer exit code: $($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Installer exited with code $($proc.ExitCode)."
+            exit 1
+          }
+          echo "INSTALL_DIR=$installDir" >> $env:GITHUB_ENV
+
+      # ---------------------------------------------------------------
+      # 5. Verify expected files exist after install
+      # ---------------------------------------------------------------
+      - name: Verify Installed Files
+        shell: pwsh
+        run: |
+          $dir = $env:INSTALL_DIR
+          $required = @(
+            "qemu-system-aarch64.exe",
+            "qemu-system-x86_64.exe",
+            "qemu-img.exe",
+            "qemu-io.exe",
+            "uninstall.exe"
+          )
+          $missing = @()
+          foreach ($f in $required) {
+            if (Test-Path "$dir\$f") {
+              Write-Host "FOUND: $f"
+            } else {
+              Write-Host "MISSING: $f"
+              $missing += $f
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "Missing files after install: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "All required files present."
+
+      # ---------------------------------------------------------------
+      # 6. Verify binaries report correct version
+      # ---------------------------------------------------------------
+      - name: Check Binary Versions
+        shell: pwsh
+        run: |
+          $dir  = $env:INSTALL_DIR
+          $tag  = "${{ steps.tag.outputs.TAG }}"
+          # Strip leading 'v' for version string comparison (v11.0.0 → 11.0.0)
+          $ver  = $tag.TrimStart("v")
+          $pass = $true
+
+          foreach ($exe in @("qemu-system-aarch64.exe", "qemu-system-x86_64.exe")) {
+            try {
+              $out = & "$dir\$exe" --version 2>&1
+              Write-Host "${exe}: $out"
+              if ($out -notmatch [regex]::Escape($ver)) {
+                Write-Warning "${exe} version output does not contain expected '$ver'."
+                $pass = $false
+              }
+            } catch {
+              Write-Error "Failed to run ${exe}: $_"
+              $pass = $false
+            }
+          }
+          if (-not $pass) { exit 1 }
+
+      # ---------------------------------------------------------------
+      # 7. Verify PATH was updated for the current user
+      # ---------------------------------------------------------------
+      - name: Verify PATH Entry
+        shell: pwsh
+        run: |
+          $dir = $env:INSTALL_DIR
+          # Read HKCU PATH directly from registry — not the process PATH,
+          # which may not have been refreshed in this session yet.
+          $regPath = (Get-ItemProperty -Path "HKCU:\Environment" -Name "PATH" -ErrorAction SilentlyContinue).PATH
+          if ($regPath -like "*$dir*") {
+            Write-Host "PATH entry confirmed in HKCU\Environment: $dir"
+          } else {
+            Write-Error "Install directory not found in HKCU PATH.$\nRegistry PATH: $regPath"
+            exit 1
+          }
+
+      # ---------------------------------------------------------------
+      # 8. Run silent uninstall
+      # ---------------------------------------------------------------
+      - name: Run Silent Uninstall
+        shell: pwsh
+        run: |
+          $uninstaller = "$env:INSTALL_DIR\uninstall.exe"
+          if (-not (Test-Path $uninstaller)) {
+            Write-Error "Uninstaller not found at: $uninstaller"
+            exit 1
+          }
+          Write-Host "Running silent uninstall..."
+          $proc = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
+          Write-Host "Uninstaller exit code: $($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Uninstaller exited with code $($proc.ExitCode)."
+            exit 1
+          }
+
+      # ---------------------------------------------------------------
+      # 9. Verify install directory was removed
+      # ---------------------------------------------------------------
+      - name: Verify Directory Removed
+        shell: pwsh
+        run: |
+          $dir = $env:INSTALL_DIR
+          if (Test-Path $dir) {
+            # Some files may be scheduled for deletion on reboot (/REBOOTOK).
+            # List what's left so the log is informative rather than just failing.
+            Write-Warning "Install directory still exists after uninstall: $dir"
+            Get-ChildItem $dir -Recurse | Select-Object FullName | Format-Table -AutoSize
+            # Not a hard failure — /REBOOTOK files are expected on a live system.
+          } else {
+            Write-Host "Install directory successfully removed."
+          }
+
+      # ---------------------------------------------------------------
+      # 10. Verify PATH entry was removed
+      # ---------------------------------------------------------------
+      - name: Verify PATH Entry Removed
+        shell: pwsh
+        run: |
+          $dir     = $env:INSTALL_DIR
+          $regPath = (Get-ItemProperty -Path "HKCU:\Environment" -Name "PATH" -ErrorAction SilentlyContinue).PATH
+          if ($regPath -like "*$dir*") {
+            Write-Error "Install directory still present in HKCU PATH after uninstall.$\nPATH: $regPath"
+            exit 1
+          } else {
+            Write-Host "PATH entry correctly removed after uninstall."
+          }
+
+      # ---------------------------------------------------------------
+      # 11. Verify registry key was removed
+      # ---------------------------------------------------------------
+      - name: Verify Registry Key Removed
+        shell: pwsh
+        run: |
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\QEMUArm64"
+          if (Test-Path $key) {
+            Write-Error "Uninstall registry key still present after uninstall: $key"
+            exit 1
+          } else {
+            Write-Host "Registry key correctly removed after uninstall."
+          }
+
+      # ---------------------------------------------------------------
+      # 12. Summary
+      # ---------------------------------------------------------------
+      - name: CI Summary
+        if: success()
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.tag.outputs.TAG }}"
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "  CI PASSED for release $tag"
+          Write-Host "  - Installer downloaded and verified"
+          Write-Host "  - Silent install succeeded"
+          Write-Host "  - All required files present"
+          Write-Host "  - Binary versions correct"
+          Write-Host "  - PATH entry added correctly"
+          Write-Host "  - Silent uninstall succeeded"
+          Write-Host "  - PATH entry removed correctly"
+          Write-Host "  - Registry key cleaned up"
+          Write-Host "========================================"
