@@ -228,11 +228,13 @@ jobs:
           # because the working directory is not the workflow repo — it is the
           # qemu-source checkout — and pushing would target the wrong remote.
           # `gh release delete --cleanup-tag` handles both in one API call.
-          gh release delete $TagName --cleanup-tag --yes 2>$null
+          gh release delete $TagName --repo "${{ github.repository }}" --cleanup-tag --yes 2>$null
+          $LASTEXITCODE = 0
 
           $notes = "Native QEMU build for Snapdragon / Windows 11 ARM64.`nTargets: aarch64-softmmu, x86_64-softmmu. WHPX acceleration enabled. User-scoped installer — no admin credentials required. Supports custom install paths and secondary drives."
 
           gh release create $TagName `
             "$env:GITHUB_WORKSPACE\qemu-user-setup.exe" `
+            --repo "${{ github.repository }}" `
             --title "QEMU Windows ARM64 — $TagName" `
             --notes $notes
