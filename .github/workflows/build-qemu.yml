@@ -119,50 +119,75 @@ jobs:
       - name: Flatten App Structure and Bundle Required DLLs
         run: |
           OUTDIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-windows-arm64
+          SOURCE_DIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-source
 
-          # On Windows, QEMU's meson install puts EXEs directly in the prefix root
-          # (not in bin/) and firmware/keymaps directly in share/ (not share/qemu/).
-          # Nothing to move — EXEs are already at $OUTDIR/*.exe.
-
-          # Copy firmware/keymaps/etc from share/ into the root for a flat layout
+          # Copy firmware/keymaps from share/ into root for flat layout
           if [ -d "$OUTDIR/share" ]; then
             cp -r "$OUTDIR/share/"* "$OUTDIR/"
           fi
 
-          # Collect DLLs via ntldd (direct + transitive)
-          for exe in "$OUTDIR/"*.exe; do
-            ntldd -R "$exe" \
-              | grep -i '/clangarm64/' \
-              | awk '$3 != "not" {print $3}' \
-              | xargs -r -I{} cp --no-clobber "{}" "$OUTDIR/" || true
-          done
+          # Use QEMU's own bundling script if present (QEMU 8.0+)
+          if [ -f "$SOURCE_DIR/scripts/qemu-bundle.py" ]; then
+            echo "Using qemu-bundle.py from source tree"
+            python3 "$SOURCE_DIR/scripts/qemu-bundle.py" \
+              --build-dir "$SOURCE_DIR/build" \
+              --install-dir "$OUTDIR"
 
-          for dll in "$OUTDIR/"*.dll; do
-            ntldd -R "$dll" \
-              | grep -i '/clangarm64/' \
-              | awk '$3 != "not" {print $3}' \
-              | xargs -r -I{} cp --no-clobber "{}" "$OUTDIR/" || true
-          done
+          else
+            echo "qemu-bundle.py not found — falling back to ntldd + known DLL list"
 
-          # Hard-copy known runtime-loaded GLib modules that ntldd cannot detect
-          # because they are opened via g_module_open() at runtime, not PE imports.
-          for dll in \
-            libgmodule-2.0-0.dll \
-            libgthread-2.0-0.dll \
-            libpcre2-8-0.dll \
-            libpcre2-16-0.dll \
-            libiconv-2.dll \
-            libintl-8.dll \
-            libffi-8.dll \
-            libbz2-1.dll \
-            libzstd.dll \
-            liblz4.dll; do
-            src="/clangarm64/bin/$dll"
-            [ -f "$src" ] && cp --no-clobber "$src" "$OUTDIR/" || true
-          done
-          # Clean up subdirectories that are no longer needed
+            # Pass 1: ntldd scan of EXEs
+            for exe in "$OUTDIR/"*.exe; do
+              ntldd -R "$exe" \
+                | grep -i '/clangarm64/' \
+                | awk '$3 != "not" {print $3}' \
+                | xargs -r -I{} cp --no-clobber "{}" "$OUTDIR/" || true
+            done
+
+            # Pass 2: ntldd scan of copied DLLs (catches transitive deps)
+            for dll in "$OUTDIR/"*.dll; do
+              ntldd -R "$dll" \
+                | grep -i '/clangarm64/' \
+                | awk '$3 != "not" {print $3}' \
+                | xargs -r -I{} cp --no-clobber "{}" "$OUTDIR/" || true
+            done
+
+            # Pass 3: hard-copy known runtime-loaded DLLs that ntldd cannot detect
+            # (g_module_open, delay-loaded, GnuTLS chain, CLANGARM64 runtime)
+            for dll in \
+              libgmodule-2.0-0.dll \
+              libgio-2.0-0.dll \
+              libgthread-2.0-0.dll \
+              libpcre2-8-0.dll \
+              libpcre2-16-0.dll \
+              libffi-8.dll \
+              libiconv-2.dll \
+              libintl-8.dll \
+              libbz2-1.dll \
+              libzstd.dll \
+              liblz4.dll \
+              libgnutls-30.dll \
+              libhogweed-6.dll \
+              libnettle-8.dll \
+              libgmp-10.dll \
+              libunistring-5.dll \
+              libidn2-0.dll \
+              libp11-kit-0.dll \
+              libtasn1-6.dll \
+              libgcrypt-20.dll \
+              libgpg-error-0.dll \
+              libcapstone.dll \
+              libslirp-0.dll \
+              libpixman-1-0.dll; do
+              src="/clangarm64/bin/$dll"
+              [ -f "$src" ] && cp --no-clobber "$src" "$OUTDIR/" && echo "copied: $dll" || true
+            done
+          fi
+
           rm -rf "$OUTDIR/share" "$OUTDIR/include" "$OUTDIR/lib"
 
+          echo "=== Final DLL list ==="
+          ls "$OUTDIR/"*.dll | xargs -I{} basename {}
       - name: Test Compiled Binaries (Health Check)
         run: |
           OUTDIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-windows-arm64
