@@ -36,9 +36,8 @@ Page instfiles
 Var PathCheck
 Var PathLen
 Var LastChar
-Var InstDirLower
-Var LocalAppLower
 Var CmpResult
+Var UserProfile     ; populated at runtime from the USERPROFILE environment variable
 
 ; --------------------------------------------------------------------------
 ; Macro: NotifyPathChange
