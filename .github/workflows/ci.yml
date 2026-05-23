@@ -133,100 +133,95 @@ jobs:
           Get-ChildItem "$dir\*.dll" | Select-Object -ExpandProperty Name | Sort-Object
 
           Write-Host ""
-          Write-Host "=== Checking imports via dumpbin ==="
-          # dumpbin is part of MSVC build tools — may not be present on ARM64 runner.
-          # Fall back to reading the PE import table manually if unavailable.
-          $dumpbin = Get-Command dumpbin -ErrorAction SilentlyContinue
-          if ($dumpbin) {
-            & dumpbin /dependents $exe | Select-String "\.dll"
-          } else {
-            Write-Host "dumpbin not available — reading PE import table directly."
-            # Read the PE import directory manually to list required DLLs
-            Add-Type -TypeDefinition @"
-                    using System;
-                    using System.IO;
-                    using System.Text;
-                    using System.Collections.Generic;
-                    public class PEReader {
-                      public static List<string> GetImports(string path) {
-                          var result = new List<string>();
-                          using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
-                          using var br = new BinaryReader(fs);
-                          // MZ header
-                          fs.Seek(0x3C, SeekOrigin.Begin);
-                          int peOffset = br.ReadInt32();
-                          fs.Seek(peOffset, SeekOrigin.Begin);
-                          uint sig = br.ReadUInt32(); // PE\0\0
-                          if (sig != 0x00004550) return result;
-                          // COFF header
-                          ushort machine = br.ReadUInt16();
-                          ushort numSections = br.ReadUInt16();
-                          fs.Seek(12, SeekOrigin.Current); // skip timestamp, symtable, numsyms
-                          ushort optHeaderSize = br.ReadUInt16();
-                          ushort characteristics = br.ReadUInt16();
-                          // Optional header — detect PE32 vs PE32+
-                          long optStart = fs.Position;
-                          ushort magic = br.ReadUInt16();
-                          bool isPE32Plus = (magic == 0x20b);
-                          // Skip to data directories
-                          fs.Seek(optStart + (isPE32Plus ? 112 : 96), SeekOrigin.Begin);
-                          // Data directory [1] = import table
-                          fs.Seek(8, SeekOrigin.Current); // skip export dir
-                          uint importRVA  = br.ReadUInt32();
-                          uint importSize = br.ReadUInt32();
-                          if (importRVA == 0) return result;
-                          // Read section headers to resolve RVA → file offset
-                          fs.Seek(optStart + optHeaderSize, SeekOrigin.Begin);
-                          long[] secVA  = new long[numSections];
-                          long[] secOff = new long[numSections];
-                          long[] secSz  = new long[numSections];
-                          for (int i = 0; i < numSections; i++) {
-                              fs.Seek(8, SeekOrigin.Current); // name
-                              secSz[i]  = br.ReadUInt32();
-                              secVA[i]  = br.ReadUInt32();
-                              uint rawSz = br.ReadUInt32();
-                              secOff[i] = br.ReadUInt32();
-                              fs.Seek(16, SeekOrigin.Current);
-                          }
-                          Func<long,long> rva2off = rva => {
-                              for (int i = 0; i < numSections; i++)
-                                  if (rva >= secVA[i] && rva < secVA[i] + secSz[i])
-                                      return secOff[i] + (rva - secVA[i]);
-                              return -1;
-                          };
-                          long importOff = rva2off(importRVA);
-                          if (importOff < 0) return result;
-                          fs.Seek(importOff, SeekOrigin.Begin);
-                          while (true) {
-                              uint iltRVA  = br.ReadUInt32();
-                              fs.Seek(8, SeekOrigin.Current);
-                              uint nameRVA = br.ReadUInt32();
-                              fs.Seek(4, SeekOrigin.Current);
-                              if (nameRVA == 0) break;
-                              long nameOff = rva2off(nameRVA);
-                              if (nameOff < 0) break;
-                              long saved = fs.Position;
-                              fs.Seek(nameOff, SeekOrigin.Begin);
-                              var sb = new StringBuilder();
-                              int b;
-                              while ((b = fs.ReadByte()) > 0) sb.Append((char)b);
-                              result.Add(sb.ToString());
-                              fs.Seek(saved, SeekOrigin.Begin);
-                          }
-                          return result;
-                      }
-                    }"@
-                    
-            $imports = [PEReader]::GetImports($exe)
-            Write-Host "DLLs required by qemu-system-aarch64.exe:"
-            $imports | Sort-Object | ForEach-Object {
-              $present = Test-Path "$dir\$_"
-              $status  = if ($present) { "OK    " } else {
-                # Check if it's a known Windows system DLL
-                $sysdll = Test-Path "$env:SystemRoot\System32\$_"
-                if ($sysdll) { "SYSDLL" } else { "MISSING >>>" }
+          Write-Host "=== DLLs required by qemu-system-aarch64.exe ==="
+
+          # Pure PowerShell PE import table reader — no Add-Type/C# needed,
+          # which would break YAML due to heredoc quoting conflicts.
+          function Get-PEImports {
+            param([string]$Path)
+            $imports = @()
+            $fs = [System.IO.File]::OpenRead($Path)
+            $br = New-Object System.IO.BinaryReader($fs)
+            try {
+              $fs.Seek(0x3C, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $peOffset = $br.ReadInt32()
+              $fs.Seek($peOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $sig = $br.ReadUInt32()
+              if ($sig -ne 0x00004550) { return $imports }
+              $machine       = $br.ReadUInt16()
+              $numSections   = $br.ReadUInt16()
+              $fs.Seek(12, [System.IO.SeekOrigin]::Current) | Out-Null
+              $optHeaderSize = $br.ReadUInt16()
+              $characteristics = $br.ReadUInt16()
+              $optStart = $fs.Position
+              $magic = $br.ReadUInt16()
+              $isPE32Plus = ($magic -eq 0x20b)
+              $ddOffset = if ($isPE32Plus) { 112 } else { 96 }
+              $fs.Seek($optStart + $ddOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $fs.Seek(8, [System.IO.SeekOrigin]::Current) | Out-Null
+              $importRVA = $br.ReadUInt32()
+              $br.ReadUInt32() | Out-Null
+              if ($importRVA -eq 0) { return $imports }
+              $fs.Seek($optStart + $optHeaderSize, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $secVA  = New-Object 'long[]' $numSections
+              $secOff = New-Object 'long[]' $numSections
+              $secSz  = New-Object 'long[]' $numSections
+              for ($i = 0; $i -lt $numSections; $i++) {
+                $fs.Seek(8, [System.IO.SeekOrigin]::Current) | Out-Null
+                $secSz[$i]  = $br.ReadUInt32()
+                $secVA[$i]  = $br.ReadUInt32()
+                $br.ReadUInt32() | Out-Null
+                $secOff[$i] = $br.ReadUInt32()
+                $fs.Seek(16, [System.IO.SeekOrigin]::Current) | Out-Null
               }
-              Write-Host "  [$status] $_"
+              $importOff = -1L
+              for ($i = 0; $i -lt $numSections; $i++) {
+                if ($importRVA -ge $secVA[$i] -and $importRVA -lt ($secVA[$i] + $secSz[$i])) {
+                  $importOff = $secOff[$i] + ($importRVA - $secVA[$i]); break
+                }
+              }
+              if ($importOff -lt 0) { return $imports }
+              $fs.Seek($importOff, [System.IO.SeekOrigin]::Begin) | Out-Null
+              while ($true) {
+                $br.ReadUInt32() | Out-Null
+                $fs.Seek(8, [System.IO.SeekOrigin]::Current) | Out-Null
+                $nameRVA = $br.ReadUInt32()
+                $fs.Seek(4, [System.IO.SeekOrigin]::Current) | Out-Null
+                if ($nameRVA -eq 0) { break }
+                $nameOff = -1L
+                for ($i = 0; $i -lt $numSections; $i++) {
+                  if ($nameRVA -ge $secVA[$i] -and $nameRVA -lt ($secVA[$i] + $secSz[$i])) {
+                    $nameOff = $secOff[$i] + ($nameRVA - $secVA[$i]); break
+                  }
+                }
+                if ($nameOff -lt 0) { break }
+                $saved = $fs.Position
+                $fs.Seek($nameOff, [System.IO.SeekOrigin]::Begin) | Out-Null
+                $chars = New-Object System.Collections.Generic.List[byte]
+                $b = $fs.ReadByte()
+                while ($b -gt 0) { $chars.Add([byte]$b); $b = $fs.ReadByte() }
+                $imports += [System.Text.Encoding]::ASCII.GetString($chars.ToArray())
+                $fs.Seek($saved, [System.IO.SeekOrigin]::Begin) | Out-Null
+              }
+            } finally {
+              $br.Dispose(); $fs.Dispose()
+            }
+            return $imports
+          }
+
+          $imports = Get-PEImports $exe
+          if ($imports.Count -eq 0) {
+            Write-Warning "Could not parse import table — PE may be packed or path invalid."
+          } else {
+            $imports | Sort-Object | ForEach-Object {
+              $name = $_
+              if (Test-Path "$dir\$name") {
+                Write-Host "  [OK    ] $name"
+              } elseif (Test-Path "$env:SystemRoot\System32\$name") {
+                Write-Host "  [SYSDLL] $name"
+              } else {
+                Write-Host "  [MISSING >>>] $name"
+              }
             }
           }
 

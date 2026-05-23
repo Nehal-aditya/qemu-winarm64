@@ -129,9 +129,7 @@ jobs:
             cp -r "$OUTDIR/share/"* "$OUTDIR/"
           fi
 
-          # Use ntldd to collect only the DLLs each EXE actually needs,
-          # filtering to only those that live inside the CLANGARM64 prefix.
-          # Column 3 holds the resolved path; skip lines where it's "not" (not found).
+          # Collect DLLs via ntldd (direct + transitive)
           for exe in "$OUTDIR/"*.exe; do
             ntldd -R "$exe" \
               | grep -i '/clangarm64/' \
@@ -139,6 +137,29 @@ jobs:
               | xargs -r -I{} cp --no-clobber "{}" "$OUTDIR/" || true
           done
 
+          for dll in "$OUTDIR/"*.dll; do
+            ntldd -R "$dll" \
+              | grep -i '/clangarm64/' \
+              | awk '$3 != "not" {print $3}' \
+              | xargs -r -I{} cp --no-clobber "{}" "$OUTDIR/" || true
+          done
+
+          # Hard-copy known runtime-loaded GLib modules that ntldd cannot detect
+          # because they are opened via g_module_open() at runtime, not PE imports.
+          for dll in \
+            libgmodule-2.0-0.dll \
+            libgthread-2.0-0.dll \
+            libpcre2-8-0.dll \
+            libpcre2-16-0.dll \
+            libiconv-2.dll \
+            libintl-8.dll \
+            libffi-8.dll \
+            libbz2-1.dll \
+            libzstd.dll \
+            liblz4.dll; do
+            src="/clangarm64/bin/$dll"
+            [ -f "$src" ] && cp --no-clobber "$src" "$OUTDIR/" || true
+          done
           # Clean up subdirectories that are no longer needed
           rm -rf "$OUTDIR/share" "$OUTDIR/include" "$OUTDIR/lib"
 
