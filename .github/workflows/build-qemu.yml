@@ -64,21 +64,27 @@ jobs:
             mingw-w64-x86_64-nsis
 
       - name: Download and Install NSIS EnVar Plugin
-        run: |
+        run: |-
             curl -sSfL -o envar_plugin.zip \
             https://github.com/GsNSIS/EnVar/releases/latest/download/EnVar-Plugin.zip
 
-            # NSIS is the native Windows install — derive path from makensis location
-            NSIS_HOME=$(dirname "$(which makensis)")/../share/nsis
-            echo "NSIS_HOME: $NSIS_HOME"
+            # The Generate Installer step uses the NATIVE Windows x64 makensis
+            # (from the runner's pre-installed NSIS at C:\Program Files (x86)\NSIS).
+            # That binary looks for plugins in ITS OWN directory, not the MSYS2 one.
+            # We must extract EnVar.dll into both of its plugin subdirs.
+            NSIS_WIN="C:\\Program Files (x86)\\NSIS"
+            NSIS_POSIX=$(cygpath -u "$NSIS_WIN")
 
-            mkdir -p "$NSIS_HOME/Plugins/amd64-unicode"
-            mkdir -p "$NSIS_HOME/Plugins/x86-unicode"
+            mkdir -p "$NSIS_POSIX/Plugins/amd64-unicode"
+            mkdir -p "$NSIS_POSIX/Plugins/x86-unicode"
 
             unzip -j envar_plugin.zip "Plugins/amd64-unicode/EnVar.dll" \
-              -d "$NSIS_HOME/Plugins/amd64-unicode/"
+              -d "$NSIS_POSIX/Plugins/amd64-unicode/"
             unzip -j envar_plugin.zip "Plugins/x86-unicode/EnVar.dll" \
-              -d "$NSIS_HOME/Plugins/x86-unicode/"
+              -d "$NSIS_POSIX/Plugins/x86-unicode/"
+
+            echo "EnVar plugin installed to: $NSIS_POSIX/Plugins/"
+            ls "$NSIS_POSIX/Plugins/x86-unicode/"
 
       - name: Configure QEMU Execution Layers (WHPX Enabled)
         run: |
