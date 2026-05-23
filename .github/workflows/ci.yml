@@ -163,8 +163,18 @@ jobs:
 
           foreach ($exe in @("qemu-system-aarch64.exe", "qemu-system-x86_64.exe")) {
             try {
-              $out = & "$dir\$exe" --version 2>&1
+              # Use cmd /c to capture output reliably — PowerShell's & operator
+              # can silently lose output from binaries that detach from the console
+              # or write directly to the Win32 console buffer (common on ARM64).
+              $out = cmd /c "`"$dir\$exe`" --version 2>&1"
               Write-Host "${exe}: $out"
+
+              if (-not $out) {
+                Write-Error "${exe} produced no output from --version. Binary may be non-functional or missing DLLs."
+                $pass = $false
+                continue
+              }
+
               if ($out -notmatch [regex]::Escape($ver)) {
                 Write-Warning "${exe} version output does not contain expected '$ver'."
                 $pass = $false
