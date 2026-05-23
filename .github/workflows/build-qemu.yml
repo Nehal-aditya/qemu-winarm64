@@ -224,9 +224,14 @@ jobs:
           # Sanitise: if somehow a branch ref slips through, use a snapshot label
           if ($TagName -notmatch '^v') { $TagName = "manual-snapshot-$TagName" }
 
+          # --clobber was added in gh v2.28 and isn't available on all runners.
+          # Manually delete any existing release + tag before re-creating.
+          gh release delete $TagName --yes 2>$null
+          git tag -d $TagName 2>$null
+          git push origin ":refs/tags/$TagName" 2>$null
+
           gh release create $TagName `
             "$env:GITHUB_WORKSPACE\qemu-user-setup.exe" `
             --title "QEMU Windows ARM64 — $TagName" `
             --notes "Native QEMU build for Snapdragon / Windows 11 ARM64.
-          Targets: aarch64-softmmu, x86_64-softmmu. WHPX acceleration enabled. User-scoped installer — no admin credentials required. Supports custom install paths and secondary drives." `
-            --clobber
+          Targets: aarch64-softmmu, x86_64-softmmu. WHPX acceleration enabled. User-scoped installer — no admin credentials required. Supports custom install paths and secondary drives."
