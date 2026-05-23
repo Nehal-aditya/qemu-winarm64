@@ -162,26 +162,59 @@ jobs:
           $pass = $true
 
           foreach ($exe in @("qemu-system-aarch64.exe", "qemu-system-x86_64.exe")) {
+            $exePath = "$dir\$exe"
+            Write-Host "---"
+            Write-Host "Testing: $exePath"
+
+            # --- DLL dependency check first ---
+            # Load the binary's import table via Get-Item + PE parsing is complex;
+            # instead just attempt to start the process with a 5s timeout and
+            # capture stdout + stderr via redirected handles — the most reliable
+            # approach on Windows ARM64 runners where console-subsystem quirks vary.
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName               = $exePath
+            $psi.Arguments              = "--version"
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError  = $true
+            $psi.UseShellExecute        = $false
+            $psi.CreateNoWindow         = $true
+
+            $proc = New-Object System.Diagnostics.Process
+            $proc.StartInfo = $psi
+
             try {
-              # Use cmd /c to capture output reliably — PowerShell's & operator
-              # can silently lose output from binaries that detach from the console
-              # or write directly to the Win32 console buffer (common on ARM64).
-              $out = cmd /c "`"$dir\$exe`" --version 2>&1"
-              Write-Host "${exe}: $out"
-
-              if (-not $out) {
-                Write-Error "${exe} produced no output from --version. Binary may be non-functional or missing DLLs."
-                $pass = $false
-                continue
-              }
-
-              if ($out -notmatch [regex]::Escape($ver)) {
-                Write-Warning "${exe} version output does not contain expected '$ver'."
-                $pass = $false
-              }
+              $proc.Start() | Out-Null
+              # Read both streams before WaitForExit to avoid deadlock
+              $stdout = $proc.StandardOutput.ReadToEnd()
+              $stderr = $proc.StandardError.ReadToEnd()
+              $proc.WaitForExit(5000) | Out-Null
+              $exitCode = $proc.ExitCode
             } catch {
-              Write-Error "Failed to run ${exe}: $_"
+              Write-Error "${exe}: failed to start — $_"
+              Write-Host "This usually means a required DLL is missing from $dir"
+              Write-Host "DLLs present in install dir:"
+              Get-ChildItem "$dir\*.dll" | Select-Object -ExpandProperty Name | Sort-Object
               $pass = $false
+              continue
+            }
+
+            $out = ($stdout + $stderr).Trim()
+            Write-Host "${exe} exit code: $exitCode"
+            Write-Host "${exe} output: $out"
+
+            if ($exitCode -ne 0 -or -not $out) {
+              Write-Error "${exe} exited with code $exitCode and produced no usable output."
+              Write-Host "DLLs present in install dir:"
+              Get-ChildItem "$dir\*.dll" | Select-Object -ExpandProperty Name | Sort-Object
+              $pass = $false
+              continue
+            }
+
+            if ($out -notmatch [regex]::Escape($ver)) {
+              Write-Warning "${exe} output does not contain expected version '$ver'. Got: $out"
+              $pass = $false
+            } else {
+              Write-Host "${exe}: version check passed."
             }
           }
           if (-not $pass) { exit 1 }
