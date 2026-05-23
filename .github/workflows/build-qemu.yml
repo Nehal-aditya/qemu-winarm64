@@ -125,6 +125,8 @@ jobs:
           if [ -d "$OUTDIR/share" ]; then
             cp -r "$OUTDIR/share/"* "$OUTDIR/"
           fi
+          
+          tree $OUTDIR /f
 
           # Use QEMU's own bundling script if present (QEMU 8.0+)
           if [ -f "$SOURCE_DIR/scripts/qemu-bundle.py" ]; then
