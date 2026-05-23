@@ -39,9 +39,15 @@ jobs:
             $tag = "${{ github.event.release.tag_name }}"
             Write-Host "Using release event tag: $tag"
           } else {
-            # Fall back to latest release via GitHub API
-            $resp = gh release list --limit 1 --json tagName | ConvertFrom-Json
-            $tag  = $resp[0].tagName
+            # Fall back to latest release via GitHub API.
+            # --repo is required: there is no checkout in this workflow,
+            # so gh cannot infer the repo from .git in the CWD.
+            $resp = gh release list --limit 1 --json tagName --repo "${{ github.repository }}" | ConvertFrom-Json
+            if (-not $resp -or $resp.Count -eq 0) {
+              Write-Error "No releases found in ${{ github.repository }}."
+              exit 1
+            }
+            $tag = $resp[0].tagName
             Write-Host "Using latest release tag: $tag"
           }
 
@@ -62,7 +68,10 @@ jobs:
         run: |
           $tag = "${{ steps.tag.outputs.TAG }}"
           Write-Host "Downloading qemu-user-setup.exe from release $tag ..."
-          gh release download $tag --pattern "qemu-user-setup.exe" --dir "$env:TEMP\qemu-ci" --repo $env:GITHUB_REPOSITORY
+          gh release download $tag `
+            --pattern "qemu-user-setup.exe" `
+            --dir "$env:TEMP\qemu-ci" `
+            --repo "${{ github.repository }}"
           if (-not (Test-Path "$env:TEMP\qemu-ci\qemu-user-setup.exe")) {
             Write-Error "Installer not found in release $tag."
             exit 1
@@ -180,7 +189,7 @@ jobs:
           if ($regPath -like "*$dir*") {
             Write-Host "PATH entry confirmed in HKCU\Environment: $dir"
           } else {
-            Write-Error "Install directory not found in HKCU PATH.$\nRegistry PATH: $regPath"
+            Write-Error "Install directory not found in HKCU PATH.`nRegistry PATH: $regPath"
             exit 1
           }
 
@@ -229,7 +238,7 @@ jobs:
           $dir     = $env:INSTALL_DIR
           $regPath = (Get-ItemProperty -Path "HKCU:\Environment" -Name "PATH" -ErrorAction SilentlyContinue).PATH
           if ($regPath -like "*$dir*") {
-            Write-Error "Install directory still present in HKCU PATH after uninstall.$\nPATH: $regPath"
+            Write-Error "Install directory still present in HKCU PATH after uninstall.`nPATH: $regPath"
             exit 1
           } else {
             Write-Host "PATH entry correctly removed after uninstall."
