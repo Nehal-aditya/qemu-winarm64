@@ -110,6 +110,25 @@ jobs:
             make -j$(nproc)
             make install
 
+      - name: Debug — List Install Tree
+        if: always()
+        run: |
+            INSTALL_PREFIX=$(cygpath -m "$GITHUB_WORKSPACE")/qemu-windows-arm64
+            INSTALL_POSIX=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-windows-arm64
+            echo "=== Windows-style prefix ==="
+            echo "$INSTALL_PREFIX"
+            echo "=== POSIX-style prefix ==="
+            echo "$INSTALL_POSIX"
+            echo "=== Parent directory contents ==="
+            ls -la "$(cygpath -u "$GITHUB_WORKSPACE")/" || echo "(ls failed)"
+            echo "=== Install dir exists? ==="
+            ls -la "$INSTALL_POSIX/" || echo "(install dir not found)"
+            echo "=== Recursive tree (up to 3 levels) ==="
+            find "$INSTALL_POSIX" -maxdepth 3 2>/dev/null || echo "(find failed — dir does not exist)"
+            echo "=== Check Windows path directly ==="
+            cmd /c dir "$(cygpath -w "$GITHUB_WORKSPACE")" 2>&1 || true
+        shell: C:\a\_temp\setup-msys2\msys2.CMD {0}
+
       - name: Flatten App Structure and Bundle Required DLLs
         run: |
           OUTDIR=$(cygpath -u "$GITHUB_WORKSPACE")/qemu-windows-arm64
