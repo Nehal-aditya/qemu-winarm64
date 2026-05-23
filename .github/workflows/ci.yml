@@ -143,80 +143,80 @@ jobs:
             Write-Host "dumpbin not available — reading PE import table directly."
             # Read the PE import directory manually to list required DLLs
             Add-Type -TypeDefinition @"
-using System;
-using System.IO;
-using System.Text;
-using System.Collections.Generic;
-public class PEReader {
-    public static List<string> GetImports(string path) {
-        var result = new List<string>();
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
-        using var br = new BinaryReader(fs);
-        // MZ header
-        fs.Seek(0x3C, SeekOrigin.Begin);
-        int peOffset = br.ReadInt32();
-        fs.Seek(peOffset, SeekOrigin.Begin);
-        uint sig = br.ReadUInt32(); // PE\0\0
-        if (sig != 0x00004550) return result;
-        // COFF header
-        ushort machine = br.ReadUInt16();
-        ushort numSections = br.ReadUInt16();
-        fs.Seek(12, SeekOrigin.Current); // skip timestamp, symtable, numsyms
-        ushort optHeaderSize = br.ReadUInt16();
-        ushort characteristics = br.ReadUInt16();
-        // Optional header — detect PE32 vs PE32+
-        long optStart = fs.Position;
-        ushort magic = br.ReadUInt16();
-        bool isPE32Plus = (magic == 0x20b);
-        // Skip to data directories
-        fs.Seek(optStart + (isPE32Plus ? 112 : 96), SeekOrigin.Begin);
-        // Data directory [1] = import table
-        fs.Seek(8, SeekOrigin.Current); // skip export dir
-        uint importRVA  = br.ReadUInt32();
-        uint importSize = br.ReadUInt32();
-        if (importRVA == 0) return result;
-        // Read section headers to resolve RVA → file offset
-        fs.Seek(optStart + optHeaderSize, SeekOrigin.Begin);
-        long[] secVA  = new long[numSections];
-        long[] secOff = new long[numSections];
-        long[] secSz  = new long[numSections];
-        for (int i = 0; i < numSections; i++) {
-            fs.Seek(8, SeekOrigin.Current); // name
-            secSz[i]  = br.ReadUInt32();
-            secVA[i]  = br.ReadUInt32();
-            uint rawSz = br.ReadUInt32();
-            secOff[i] = br.ReadUInt32();
-            fs.Seek(16, SeekOrigin.Current);
-        }
-        Func<long,long> rva2off = rva => {
-            for (int i = 0; i < numSections; i++)
-                if (rva >= secVA[i] && rva < secVA[i] + secSz[i])
-                    return secOff[i] + (rva - secVA[i]);
-            return -1;
-        };
-        long importOff = rva2off(importRVA);
-        if (importOff < 0) return result;
-        fs.Seek(importOff, SeekOrigin.Begin);
-        while (true) {
-            uint iltRVA  = br.ReadUInt32();
-            fs.Seek(8, SeekOrigin.Current);
-            uint nameRVA = br.ReadUInt32();
-            fs.Seek(4, SeekOrigin.Current);
-            if (nameRVA == 0) break;
-            long nameOff = rva2off(nameRVA);
-            if (nameOff < 0) break;
-            long saved = fs.Position;
-            fs.Seek(nameOff, SeekOrigin.Begin);
-            var sb = new StringBuilder();
-            int b;
-            while ((b = fs.ReadByte()) > 0) sb.Append((char)b);
-            result.Add(sb.ToString());
-            fs.Seek(saved, SeekOrigin.Begin);
-        }
-        return result;
-    }
-}
-"@
+                    using System;
+                    using System.IO;
+                    using System.Text;
+                    using System.Collections.Generic;
+                    public class PEReader {
+                      public static List<string> GetImports(string path) {
+                          var result = new List<string>();
+                          using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
+                          using var br = new BinaryReader(fs);
+                          // MZ header
+                          fs.Seek(0x3C, SeekOrigin.Begin);
+                          int peOffset = br.ReadInt32();
+                          fs.Seek(peOffset, SeekOrigin.Begin);
+                          uint sig = br.ReadUInt32(); // PE\0\0
+                          if (sig != 0x00004550) return result;
+                          // COFF header
+                          ushort machine = br.ReadUInt16();
+                          ushort numSections = br.ReadUInt16();
+                          fs.Seek(12, SeekOrigin.Current); // skip timestamp, symtable, numsyms
+                          ushort optHeaderSize = br.ReadUInt16();
+                          ushort characteristics = br.ReadUInt16();
+                          // Optional header — detect PE32 vs PE32+
+                          long optStart = fs.Position;
+                          ushort magic = br.ReadUInt16();
+                          bool isPE32Plus = (magic == 0x20b);
+                          // Skip to data directories
+                          fs.Seek(optStart + (isPE32Plus ? 112 : 96), SeekOrigin.Begin);
+                          // Data directory [1] = import table
+                          fs.Seek(8, SeekOrigin.Current); // skip export dir
+                          uint importRVA  = br.ReadUInt32();
+                          uint importSize = br.ReadUInt32();
+                          if (importRVA == 0) return result;
+                          // Read section headers to resolve RVA → file offset
+                          fs.Seek(optStart + optHeaderSize, SeekOrigin.Begin);
+                          long[] secVA  = new long[numSections];
+                          long[] secOff = new long[numSections];
+                          long[] secSz  = new long[numSections];
+                          for (int i = 0; i < numSections; i++) {
+                              fs.Seek(8, SeekOrigin.Current); // name
+                              secSz[i]  = br.ReadUInt32();
+                              secVA[i]  = br.ReadUInt32();
+                              uint rawSz = br.ReadUInt32();
+                              secOff[i] = br.ReadUInt32();
+                              fs.Seek(16, SeekOrigin.Current);
+                          }
+                          Func<long,long> rva2off = rva => {
+                              for (int i = 0; i < numSections; i++)
+                                  if (rva >= secVA[i] && rva < secVA[i] + secSz[i])
+                                      return secOff[i] + (rva - secVA[i]);
+                              return -1;
+                          };
+                          long importOff = rva2off(importRVA);
+                          if (importOff < 0) return result;
+                          fs.Seek(importOff, SeekOrigin.Begin);
+                          while (true) {
+                              uint iltRVA  = br.ReadUInt32();
+                              fs.Seek(8, SeekOrigin.Current);
+                              uint nameRVA = br.ReadUInt32();
+                              fs.Seek(4, SeekOrigin.Current);
+                              if (nameRVA == 0) break;
+                              long nameOff = rva2off(nameRVA);
+                              if (nameOff < 0) break;
+                              long saved = fs.Position;
+                              fs.Seek(nameOff, SeekOrigin.Begin);
+                              var sb = new StringBuilder();
+                              int b;
+                              while ((b = fs.ReadByte()) > 0) sb.Append((char)b);
+                              result.Add(sb.ToString());
+                              fs.Seek(saved, SeekOrigin.Begin);
+                          }
+                          return result;
+                      }
+                    }"@
+                    
             $imports = [PEReader]::GetImports($exe)
             Write-Host "DLLs required by qemu-system-aarch64.exe:"
             $imports | Sort-Object | ForEach-Object {
