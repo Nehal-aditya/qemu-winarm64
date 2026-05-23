@@ -1,4 +1,6 @@
 # installer.nsi
+!include "LogicLib.nsh"
+
 !define APPNAME "QEMU ARM64"
 !define COMPANY "Custom Build Pipeline"
 !define DESCRIPTION "Native QEMU System Emulator for Windows 11 ARM64"
